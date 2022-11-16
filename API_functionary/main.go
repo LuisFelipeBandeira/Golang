@@ -1,23 +1,34 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
+	"github.com/dgrijalva/jwt-go"
 	_ "github.com/go-sql-driver/mysql"
-
 	"github.com/gorilla/mux"
 )
 
 type Functionary struct {
-	Id    int
-	Nome  string
-	Setor string
-	Email string
+	Id    int    `json:"id"`
+	Nome  string `json:"name"`
+	Setor string `json:"sector"`
+	Email string `json:"email"`
+	Senha string
+}
+
+const SecretKey = "blablabla"
+
+func PasswordHash(s string) string {
+	str := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("%x", str)
 }
 
 var db *sql.DB
@@ -41,6 +52,8 @@ func UpdateUser(w http.ResponseWriter, r *http.Request) {
 	var userUpdated Functionary
 
 	json.Unmarshal(body, &userUpdated)
+
+	userUpdated.Senha = PasswordHash(userUpdated.Senha)
 
 	row, errSelectContent := db.Query("SELECT COUNT(*) FROM funcs WHERE Id = ?", id)
 	if errSelectContent != nil {
@@ -71,11 +84,14 @@ func UpdateUser(w http.ResponseWriter, r *http.Request) {
 			updateEmail, _ := db.Prepare("UPDATE funcs SET Email = ? WHERE Id = ?")
 			updateEmail.Exec(userUpdated.Email, id)
 		}
+		if userUpdated.Senha != "" {
+			updatePassword, _ := db.Prepare("UPDATE funcs SET Password = ? WHERE Id = ?")
+			updatePassword.Exec(userUpdated.Senha, id)
+		}
 		json.NewEncoder(w).Encode("Funcionário atualizado com sucesso!")
 		w.WriteHeader(http.StatusOK)
 		return
 	} else {
-		log.Println("Está parando aqui")
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -113,11 +129,20 @@ func InsertNewFunc(w http.ResponseWriter, r *http.Request) {
 
 	var newUser Functionary
 
-	json.Unmarshal(body, &newUser)
+	errUnmarshal := json.Unmarshal(body, &newUser)
+	if errUnmarshal != nil {
+		log.Fatalln("Erro ao realizar Unmarshal do body para a struct")
+	}
 
-	post, _ := db.Prepare("INSERT INTO funcs (Name, Sector, Email) VALUES (?, ?, ?)")
+	newUser.Senha = PasswordHash(newUser.Senha)
 
-	_, errInsert := post.Exec(newUser.Nome, newUser.Setor, newUser.Email)
+	post, errPrep := db.Prepare("INSERT INTO funcs (Name, Sector, Email, Password) VALUES (?, ?, ?, ?)")
+	if errPrep != nil {
+		log.Fatalln("Erro prepare insert")
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+
+	_, errInsert := post.Exec(newUser.Nome, newUser.Setor, newUser.Email, newUser.Senha)
 
 	if errInsert != nil {
 		log.Println("InsertNewFunc: Error ao realizar Insert: ", errInsert.Error())
@@ -125,7 +150,7 @@ func InsertNewFunc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	json.NewEncoder(w).Encode("Funcionário cadastrado com sucesso!")
+	w.Write([]byte("Funcionário cadastrado com sucesso!"))
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -216,14 +241,140 @@ func jsonMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func Login(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Fatalln("Error to get body of request")
+	}
+
+	var usrLogin Functionary
+
+	json.Unmarshal(body, &usrLogin)
+
+	var count int
+
+	row, errSelect := db.Query("SELECT COUNT(*) FROM funcs WHERE Email = ?", usrLogin.Email)
+	if errSelect != nil {
+		log.Println("Login: Error ao buscar funcionário para login: ", errSelect.Error())
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	for row.Next() {
+		errScan := row.Scan(&count)
+		if errScan != nil {
+			log.Println("Login: Error ao realizar Scan: ", errScan.Error())
+			return
+		}
+	}
+
+	result := db.QueryRow("SELECT Id, Name, Sector, Email, Password FROM funcs WHERE Email = ?", usrLogin.Email)
+
+	var FuncDB Functionary
+
+	errScan := result.Scan(&FuncDB.Id, &FuncDB.Nome, &FuncDB.Setor, &FuncDB.Email, &FuncDB.Senha)
+	if errScan != nil {
+		log.Println("Login: Error ao realizar scan: ", errScan.Error())
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("User not found"))
+		return
+	}
+
+	if count == 1 {
+		if FuncDB.Senha != PasswordHash(usrLogin.Senha) {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("Password invalid"))
+		} else {
+			claims := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.StandardClaims{
+				Issuer:    strconv.Itoa(int(FuncDB.Id)),
+				ExpiresAt: time.Now().Add(time.Hour * 24).Unix(),
+			})
+
+			token, err := claims.SignedString([]byte(SecretKey))
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte("Não foi possível fazer o login"))
+				return
+			}
+
+			Cookie := http.Cookie{
+				Name:     "jwt",
+				Value:    token,
+				Expires:  time.Now().Add(time.Hour * 24),
+				HttpOnly: true,
+			}
+			http.SetCookie(w, &Cookie)
+
+			w.Write([]byte("Sucess"))
+		}
+	}
+}
+
+func User(w http.ResponseWriter, r *http.Request) {
+	cookie, errGetCookie := r.Cookie("jwt")
+	if errGetCookie != nil {
+		log.Println("User: Error to get cookie")
+	}
+
+	token, errGetToken := jwt.ParseWithClaims(cookie.Value, &jwt.StandardClaims{}, func(token *jwt.Token) (interface{}, error) {
+		return []byte(SecretKey), nil
+	})
+
+	if errGetToken != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("User not loged"))
+		return
+	}
+
+	claims := token.Claims.(*jwt.StandardClaims)
+
+	result := db.QueryRow("SELECT Id, Name, Sector, Email, Password FROM funcs WHERE Id = ?", claims.Issuer)
+
+	var userDB Functionary
+
+	errScan := result.Scan(&userDB.Id, &userDB.Nome, &userDB.Setor, &userDB.Email, &userDB.Senha)
+	if errScan != nil {
+		log.Println("User: Error ao realizar scan: ", errScan.Error())
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode("User not found")
+		return
+	}
+
+	json.NewEncoder(w).Encode(userDB)
+	return
+}
+
+func LogOut(w http.ResponseWriter, r *http.Request) {
+	cookie := http.Cookie{
+		Name:     "jwt",
+		Value:    "",
+		Expires:  time.Now().Add(-time.Hour),
+		HttpOnly: true,
+	}
+	http.SetCookie(w, &cookie)
+
+	json.NewEncoder(w).Encode("message: sucess")
+	return
+}
+
 func main() {
 	ConfigDb()
 	Router := mux.NewRouter().StrictSlash(true)
 	Router.Use(jsonMiddleware)
+
 	Router.HandleFunc("/funcs", ListAllFuncs).Methods("GET")
+	Router.HandleFunc("/user", User).Methods("GET")
+	Router.HandleFunc("/logout", LogOut).Methods("POST")
+
 	Router.HandleFunc("/funcs/{FuncId}", ListOneFunc).Methods("GET")
+
 	Router.HandleFunc("/funcs", InsertNewFunc).Methods("POST")
+
+	Router.HandleFunc("/login", Login).Methods("POST")
+
 	Router.HandleFunc("/funcs/{FuncId}", DeleteFunc).Methods("DELETE")
+
 	Router.HandleFunc("/funcs/{FuncId}", UpdateUser).Methods("PUT")
 
 	log.Fatal(http.ListenAndServe(":8080", Router))
