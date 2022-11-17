@@ -17,11 +17,12 @@ import (
 )
 
 type Functionary struct {
-	Id    int    `json:"id"`
-	Nome  string `json:"name"`
-	Setor string `json:"sector"`
-	Email string `json:"email"`
-	Senha string
+	Id         int    `json:"id"`
+	Nome       string `json:"name"`
+	Setor      string `json:"sector"`
+	Email      string `json:"email"`
+	Senha      string
+	Permission int `json:"permission"`
 }
 
 const SecretKey = "blablabla"
@@ -34,6 +35,44 @@ func PasswordHash(s string) string {
 var db *sql.DB
 
 func UpdateUser(w http.ResponseWriter, r *http.Request) {
+	cookie, errGetCookie := r.Cookie("jwt")
+	if errGetCookie != nil {
+		log.Println("UpdateUser: Error to get cookie")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("User not loged"))
+		return
+	}
+
+	token, errGetToken := jwt.ParseWithClaims(cookie.Value, &jwt.StandardClaims{}, func(token *jwt.Token) (interface{}, error) {
+		return []byte(SecretKey), nil
+	})
+
+	if errGetToken != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("User not loged"))
+		return
+	}
+
+	claims := token.Claims.(*jwt.StandardClaims)
+
+	result := db.QueryRow("SELECT AdmPermission FROM funcs WHERE Id = ?", claims.Issuer)
+
+	var userDB Functionary
+
+	errScan := result.Scan(&userDB.Permission)
+	if errScan != nil {
+		log.Println("User: Error ao realizar scan: ", errScan.Error())
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode("User not found")
+		return
+	}
+
+	if userDB.Permission != 1 {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("Usuário não tem permissão"))
+		return
+	}
+
 	vars := mux.Vars(r)
 	id, errConv := strconv.Atoi(vars["FuncId"])
 	if errConv != nil {
@@ -99,6 +138,44 @@ func UpdateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func DeleteFunc(w http.ResponseWriter, r *http.Request) {
+	cookie, errGetCookie := r.Cookie("jwt")
+	if errGetCookie != nil {
+		log.Println("UpdateUser: Error to get cookie")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("User not loged"))
+		return
+	}
+
+	token, errGetToken := jwt.ParseWithClaims(cookie.Value, &jwt.StandardClaims{}, func(token *jwt.Token) (interface{}, error) {
+		return []byte(SecretKey), nil
+	})
+
+	if errGetToken != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("User not loged"))
+		return
+	}
+
+	claims := token.Claims.(*jwt.StandardClaims)
+
+	result := db.QueryRow("SELECT AdmPermission FROM funcs WHERE Id = ?", claims.Issuer)
+
+	var userDB Functionary
+
+	errScan := result.Scan(&userDB.Permission)
+	if errScan != nil {
+		log.Println("User: Error ao realizar scan: ", errScan.Error())
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode("User not found")
+		return
+	}
+
+	if userDB.Permission != 1 {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("Usuário não tem permissão"))
+		return
+	}
+
 	vars := mux.Vars(r)
 	id, errConv := strconv.Atoi(vars["FuncId"])
 	if errConv != nil {
@@ -120,6 +197,44 @@ func DeleteFunc(w http.ResponseWriter, r *http.Request) {
 }
 
 func InsertNewFunc(w http.ResponseWriter, r *http.Request) {
+	cookie, errGetCookie := r.Cookie("jwt")
+	if errGetCookie != nil {
+		log.Println("UpdateUser: Error to get cookie")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("User not loged"))
+		return
+	}
+
+	token, errGetToken := jwt.ParseWithClaims(cookie.Value, &jwt.StandardClaims{}, func(token *jwt.Token) (interface{}, error) {
+		return []byte(SecretKey), nil
+	})
+
+	if errGetToken != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("User not loged"))
+		return
+	}
+
+	claims := token.Claims.(*jwt.StandardClaims)
+
+	result := db.QueryRow("SELECT AdmPermission FROM funcs WHERE Id = ?", claims.Issuer)
+
+	var userDB Functionary
+
+	errScan := result.Scan(&userDB.Permission)
+	if errScan != nil {
+		log.Println("User: Error ao realizar scan: ", errScan.Error())
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode("User not found")
+		return
+	}
+
+	if userDB.Permission != 1 {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("Usuário não tem permissão"))
+		return
+	}
+
 	body, errBody := io.ReadAll(r.Body)
 	if errBody != nil {
 		log.Println("InsertNewFunc: Error ao pegar body: ", errBody.Error())
@@ -136,13 +251,13 @@ func InsertNewFunc(w http.ResponseWriter, r *http.Request) {
 
 	newUser.Senha = PasswordHash(newUser.Senha)
 
-	post, errPrep := db.Prepare("INSERT INTO funcs (Name, Sector, Email, Password) VALUES (?, ?, ?, ?)")
+	post, errPrep := db.Prepare("INSERT INTO funcs (Name, Sector, Email, Password, AdmPermission) VALUES (?, ?, ?, ?, ?)")
 	if errPrep != nil {
 		log.Fatalln("Erro prepare insert")
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 
-	_, errInsert := post.Exec(newUser.Nome, newUser.Setor, newUser.Email, newUser.Senha)
+	_, errInsert := post.Exec(newUser.Nome, newUser.Setor, newUser.Email, newUser.Senha, newUser.Permission)
 
 	if errInsert != nil {
 		log.Println("InsertNewFunc: Error ao realizar Insert: ", errInsert.Error())
@@ -155,6 +270,24 @@ func InsertNewFunc(w http.ResponseWriter, r *http.Request) {
 }
 
 func ListOneFunc(w http.ResponseWriter, r *http.Request) {
+	cookie, errGetCookie := r.Cookie("jwt")
+	if errGetCookie != nil {
+		log.Println("UpdateUser: Error to get cookie")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("User not loged"))
+		return
+	}
+
+	_, errGetToken := jwt.ParseWithClaims(cookie.Value, &jwt.StandardClaims{}, func(token *jwt.Token) (interface{}, error) {
+		return []byte(SecretKey), nil
+	})
+
+	if errGetToken != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("User not loged"))
+		return
+	}
+
 	vars := mux.Vars(r)
 	id, errConv := strconv.Atoi(vars["FuncId"])
 	if errConv != nil {
@@ -163,13 +296,14 @@ func ListOneFunc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := db.QueryRow("SELECT Id, Name, Sector, Email FROM funcs WHERE Id = ?", id)
+	result := db.QueryRow("SELECT Id, Name, Sector, Email, AdmPermission FROM funcs WHERE Id = ?", id)
 
 	var funct Functionary
 
-	errScan := result.Scan(&funct.Id, &funct.Nome, &funct.Setor, &funct.Email)
+	errScan := result.Scan(&funct.Id, &funct.Nome, &funct.Setor, &funct.Email, &funct.Permission)
 	if errScan != nil {
 		log.Println("ListOneFunc: Error ao realizar scan: ", errScan.Error())
+		w.Write([]byte("User not found"))
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -184,8 +318,25 @@ func ListOneFunc(w http.ResponseWriter, r *http.Request) {
 }
 
 func ListAllFuncs(w http.ResponseWriter, r *http.Request) {
+	cookie, errGetCookie := r.Cookie("jwt")
+	if errGetCookie != nil {
+		log.Println("UpdateUser: Error to get cookie")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("User not loged"))
+		return
+	}
 
-	result, errSelect := db.Query("SELECT Id, Name, Sector, Email FROM funcs")
+	_, errGetToken := jwt.ParseWithClaims(cookie.Value, &jwt.StandardClaims{}, func(token *jwt.Token) (interface{}, error) {
+		return []byte(SecretKey), nil
+	})
+
+	if errGetToken != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte("User not loged"))
+		return
+	}
+
+	result, errSelect := db.Query("SELECT Id, Name, Sector, Email, AdmPermission Email FROM funcs")
 	if errSelect != nil {
 		log.Println("ListAllFuncs: Error ao realizar select: ", errSelect.Error())
 		w.WriteHeader(http.StatusInternalServerError)
@@ -196,7 +347,7 @@ func ListAllFuncs(w http.ResponseWriter, r *http.Request) {
 
 	for result.Next() {
 		var funct Functionary
-		errScan := result.Scan(&funct.Id, &funct.Nome, &funct.Setor, &funct.Email)
+		errScan := result.Scan(&funct.Id, &funct.Nome, &funct.Setor, &funct.Email, &funct.Permission)
 		if errScan != nil {
 			log.Println("ListAllFuncs: Error ao realizar scan: ", errScan.Error())
 			continue
